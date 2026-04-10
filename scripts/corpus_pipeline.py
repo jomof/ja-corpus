@@ -1,6 +1,8 @@
 import argparse
 import logging
 import hashlib
+import os
+import json
 from datasets import load_dataset
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions
@@ -10,26 +12,54 @@ from ja_sentence_extractor import SentenceExtractor
 
 class FetchShardDoFn(beam.DoFn):
     def process(self, shard_index, num_shards, limit, skip=0):
-        logging.info(f"Processing shard {shard_index} of {num_shards} with limit {limit}, skip {skip}")
+        cache_dir = "cache"
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = os.path.join(cache_dir, f"shard_{shard_index}_of_{num_shards}.jsonl")
+        
+        cached_count = 0
+        if os.path.exists(cache_file):
+            logging.info(f"Shard {shard_index}/{num_shards}: Reading from cache (requested limit: {limit})")
+            try:
+                with open(cache_file, 'r') as f:
+                    for line in f:
+                        if line.strip():
+                            record = json.loads(line)
+                            yield record["text"]
+                            cached_count += 1
+                            if limit > 0 and cached_count >= limit:
+                                logging.info(f"Shard {shard_index}/{num_shards}: Finished reading from cache")
+                                return
+            except Exception as e:
+                logging.warning(f"Error reading cache file {cache_file}: {e}. Will fall back to fetching.")
+                cached_count = 0
+                
+        if limit > 0 and cached_count >= limit:
+            logging.info(f"Shard {shard_index}/{num_shards}: Finished (already met limit from cache)")
+            return
+            
+        logging.info(f"Shard {shard_index}/{num_shards}: Fetching remaining {limit - cached_count if limit > 0 else 'all'} records from HF")
         try:
             dataset = load_dataset("mc4", languages=["ja"], streaming=True)
             
-            count = 0
-            yielded = 0
-            skipped = 0
-            for record in dataset["validation"]:  # Using validation as control
-                if count % num_shards == shard_index:
-                    if skipped < skip:
-                        skipped += 1
-                    else:
-                        yield record["text"]
-                        yielded += 1
-                        if limit > 0 and yielded >= limit:
-                            break
-                count += 1
-                
+            with open(cache_file, 'a') as f:
+                matched_count = 0
+                count = 0
+                for record in dataset["validation"]:
+                    if count % num_shards == shard_index:
+                        if matched_count < cached_count:
+                            matched_count += 1
+                        else:
+                            yield record["text"]
+                            f.write(json.dumps(record) + "\n")
+                            matched_count += 1
+                            if limit > 0 and matched_count >= limit:
+                                break
+                    count += 1
+                        
         except Exception as e:
             logging.error(f"Error processing shard {shard_index}: {e}")
+            
+        logging.info(f"Shard {shard_index}/{num_shards}: Finished fetching from HF")
 
 class ProcessDocumentDoFn(beam.DoFn):
     def setup(self):
@@ -66,6 +96,35 @@ class TakeOneFn(beam.CombineFn):
     def extract_output(self, accumulator):
         return accumulator
 
+class TokenizeAllModesFn(beam.DoFn):
+    def setup(self):
+        from sudachipy import dictionary
+        from sudachipy import tokenizer
+        
+        self.dict = dictionary.Dictionary()
+        self.tokenizer = self.dict.create()
+        self.mode_a = tokenizer.Tokenizer.SplitMode.A
+        self.mode_b = tokenizer.Tokenizer.SplitMode.B
+        self.mode_c = tokenizer.Tokenizer.SplitMode.C
+
+    def process(self, sentence):
+        try:
+            # Helper to clean unusual line terminators and newlines
+            def clean_surface(surface):
+                return surface.replace('\u2028', ' ').replace('\u2029', ' ').replace('\n', ' ').replace('\r', ' ')
+
+            # Mode A
+            for t in self.tokenizer.tokenize(sentence, self.mode_a):
+                yield beam.pvalue.TaggedOutput("A", clean_surface(t.surface()))
+            # Mode B
+            for t in self.tokenizer.tokenize(sentence, self.mode_b):
+                yield beam.pvalue.TaggedOutput("B", clean_surface(t.surface()))
+            # Mode C
+            for t in self.tokenizer.tokenize(sentence, self.mode_c):
+                yield beam.pvalue.TaggedOutput("C", clean_surface(t.surface()))
+        except Exception as e:
+            logging.error(f"Error in TokenizeAllModesFn: {e}")
+
 def run(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="output.txt", help="Output file")
@@ -74,6 +133,20 @@ def run(argv=None):
     parser.add_argument("--skip", type=int, default=0, help="Skip records per shard")
     
     known_args, pipeline_args = parser.parse_known_args(argv)
+    
+    # Auto-set direct_num_workers to num_cores - 2 if not specified
+    has_workers = False
+    for arg in pipeline_args:
+        if "--direct_num_workers" in arg:
+            has_workers = True
+            break
+            
+    if not has_workers:
+        num_cores = os.cpu_count()
+        if num_cores:
+            default_workers = max(1, num_cores - 2)
+            pipeline_args.append(f"--direct_num_workers={default_workers}")
+            logging.info(f"Auto-setting --direct_num_workers to {default_workers} (Total cores: {num_cores})")
     
     pipeline_options = PipelineOptions(pipeline_args)
     
@@ -104,26 +177,64 @@ def run(argv=None):
             | "ExtractSentence" >> beam.Map(lambda x: x[1])
         )
         
-        # Step 4a: Output Samples (Branch) - Use deduplicated sentences
+        # Step 4: Compute Histograms
+        mode_tokens = deduplicated_sentences | "TokenizeAllModes" >> beam.ParDo(TokenizeAllModesFn()).with_outputs("A", "B", "C")
+        
+        count_a = mode_tokens.A | "CountA" >> beam.combiners.Count.PerElement()
+        count_b = mode_tokens.B | "CountB" >> beam.combiners.Count.PerElement()
+        count_c = mode_tokens.C | "CountC" >> beam.combiners.Count.PerElement()
+        
+        joined_frequencies = (
+            {'A': count_a, 'B': count_b, 'C': count_c}
+            | "CoGroupFrequencies" >> beam.CoGroupByKey()
+        )
+        
+        def get_sort_key(element):
+            word, data = element
+            c_a = data['A'][0] if data['A'] else 0
+            c_b = data['B'][0] if data['B'] else 0
+            c_c = data['C'][0] if data['C'] else 0
+            return (c_c, c_b, c_a) # C descending, then B, then A
+            
+        def format_tsv_row(element):
+            word, data = element
+            c_a = data['A'][0] if data['A'] else 0
+            c_b = data['B'][0] if data['B'] else 0
+            c_c = data['C'][0] if data['C'] else 0
+            return f"{word}\t{c_a}\t{c_b}\t{c_c}"
+            
+        (
+            joined_frequencies
+            | "TopN" >> beam.transforms.combiners.Top.Of(1000000, key=get_sort_key)
+            | "FlattenTop" >> beam.FlatMap(lambda x: x)
+            | "FormatTSV" >> beam.Map(format_tsv_row)
+            | "WriteHistograms" >> beam.io.WriteToText(
+                "word_frequencies.tsv", 
+                shard_name_template="",
+                header="# Word frequencies generated using Sudachi tokenization (Modes A, B, C)\n# Data Provenance: HuggingFace 'mc4' dataset (validation split)\n# Word\tSudachi_A\tSudachi_B\tSudachi_C"
+            )
+        )
+        
+        # Step 5a: Output Samples (Branch) - Use deduplicated sentences
         (
             deduplicated_sentences 
             | "TakeSample" >> beam.transforms.combiners.Top.Of(100)
             | "FormatSample" >> beam.FlatMap(lambda sample_list: sample_list)
-            | "WriteSample" >> beam.io.WriteToText("sample_sentences.txt", shard_name_template="")
+            | "WriteSample" >> beam.io.WriteToText("cache/sample_sentences.txt", shard_name_template="")
         )
         
-        # Step 4b: Output Rejected Samples (Branch)
+        # Step 5b: Output Rejected Samples (Branch)
         (
             rejected
             | "TakeRejectedSample" >> beam.transforms.combiners.Top.Of(100)
             | "FormatRejectedSample" >> beam.FlatMap(lambda sample_list: sample_list)
-            | "WriteRejectedSample" >> beam.io.WriteToText("rejected_sentences.txt", shard_name_template="")
+            | "WriteRejectedSample" >> beam.io.WriteToText("cache/rejected_sentences.txt", shard_name_template="")
         )
         
-        # Step 5: Count sentences - Use deduplicated sentences
+        # Step 6: Count sentences - Use deduplicated sentences
         total_sentences = deduplicated_sentences | "CountSentences" >> beam.CombineGlobally(beam.combiners.CountCombineFn())
         
-        # Step 6: Calculate Kanji/Kana Ratio
+        # Step 7: Calculate Kanji/Kana Ratio
         orig_sum = counts | "GetOrig" >> beam.Map(lambda x: x[0]) | "SumOrig" >> beam.CombineGlobally(sum)
         recv_sum = counts | "GetRecv" >> beam.Map(lambda x: x[1]) | "SumRecv" >> beam.CombineGlobally(sum)
         
@@ -136,7 +247,7 @@ def run(argv=None):
                     
         ratio = recv_sum | "ComputeRatio" >> beam.ParDo(ComputeRatioFn(), orig=beam.pvalue.AsSingleton(orig_sum))
         
-        # Step 7: Write result to output file
+        # Step 8: Write result to output file
         results_output = p | "CreateDummy" >> beam.Create([None])
         
         (

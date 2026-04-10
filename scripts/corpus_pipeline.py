@@ -83,9 +83,9 @@ class TokenizeAllModesFn(beam.DoFn):
         self.mode_c = tokenizer.Tokenizer.SplitMode.C
 
     def process(self, sentence):
-        def clean_surface(surface):
+        def clean(text):
             return (
-                surface.replace("\u2028", " ")
+                text.replace("\u2028", " ")
                 .replace("\u2029", " ")
                 .replace("\n", " ")
                 .replace("\r", " ")
@@ -93,11 +93,17 @@ class TokenizeAllModesFn(beam.DoFn):
 
         try:
             for t in self.tokenizer.tokenize(sentence, self.mode_a):
-                yield beam.pvalue.TaggedOutput("A", clean_surface(t.surface()))
+                yield beam.pvalue.TaggedOutput(
+                    "A", (clean(t.surface()), clean(t.normalized_form()))
+                )
             for t in self.tokenizer.tokenize(sentence, self.mode_b):
-                yield beam.pvalue.TaggedOutput("B", clean_surface(t.surface()))
+                yield beam.pvalue.TaggedOutput(
+                    "B", (clean(t.surface()), clean(t.normalized_form()))
+                )
             for t in self.tokenizer.tokenize(sentence, self.mode_c):
-                yield beam.pvalue.TaggedOutput("C", clean_surface(t.surface()))
+                yield beam.pvalue.TaggedOutput(
+                    "C", (clean(t.surface()), clean(t.normalized_form()))
+                )
         except Exception as e:
             logging.error(f"Error in TokenizeAllModesFn: {e}")
 
@@ -155,9 +161,10 @@ def _build_split_pipeline(
 
     split_dir = os.path.join(output_dir, split)
 
-    # Write full deduplicated corpus (gzipped)
+    # Write full deduplicated corpus (gzipped, shuffled)
     (
         deduplicated
+        | f"Shuffle{tag}" >> beam.Reshuffle()
         | f"WriteCorpus{tag}"
         >> beam.io.WriteToText(
             os.path.join(split_dir, "sentences"),
@@ -166,7 +173,8 @@ def _build_split_pipeline(
         )
     )
 
-    # Tokenize and compute word frequencies
+    # Tokenize and compute token frequencies.
+    # Each token yields a (surface, normalized_form) pair as the key.
     mode_tokens = (
         deduplicated
         | f"Tokenize{tag}"
@@ -190,14 +198,15 @@ def _build_split_pipeline(
         return (c_c, c_b, c_a)
 
     def format_tsv_row(element):
-        word, data = element
+        key, data = element
+        surface, normalized = key
         c_a = data["A"][0] if data["A"] else 0
         c_b = data["B"][0] if data["B"] else 0
         c_c = data["C"][0] if data["C"] else 0
-        return f"{word}\t{c_a}\t{c_b}\t{c_c}"
+        return f"{surface}\t{normalized}\t{c_a}\t{c_b}\t{c_c}"
 
 
-    # Write word frequencies
+    # Write token frequencies
     (
         joined
         | f"TopN{tag}"
@@ -211,7 +220,7 @@ def _build_split_pipeline(
             header=(
                 f"# Token frequencies (Sudachi A, B, C)\n"
                 f"# Source: mc4 Japanese ({split})\n"
-                f"# Token\tSudachi_A\tSudachi_B\tSudachi_C"
+                f"# Surface\tNormalized\tSudachi_A\tSudachi_B\tSudachi_C"
             ),
         )
     )

@@ -5,3 +5,7 @@ __pycache__/
 output.txt
 sample_record.json
 cache/
+output/
+log.txt
+venv/
+cache/

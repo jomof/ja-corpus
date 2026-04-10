@@ -4,42 +4,71 @@ This document describes how to run the `corpus_pipeline.py` pipeline locally for
 
 ## Prerequisites
 
-1.  **Python**: Make sure you have Python 3.10 or higher installed.
-2.  **Virtual Environment**: It is recommended to use a virtual environment.
+1.  **Python 3.13**: SudachiPy requires Python ≤ 3.13 (PyO3 compatibility).
     ```bash
-    python -m venv venv
+    brew install python@3.13  # macOS
+    ```
+2.  **GCP Authentication**: `gcloud auth application-default login` (needed to read from GCS).
+3.  **Virtual Environment**:
+    ```bash
+    python3.13 -m venv venv
     source venv/bin/activate  # On Linux/Mac
     pip install -r requirements.txt
     ```
 
 ## Running the Pipeline
 
-To run the pipeline locally, use the following command:
-
 ```bash
-venv/bin/python scripts/corpus_pipeline.py \
-  --num_shards 8 \
-  --limit 500 \
-  --skip 0
+# Quick test: 100 docs from each split
+venv/bin/python scripts/corpus_pipeline.py --max_docs 100
+
+# Validation only
+venv/bin/python scripts/corpus_pipeline.py --splits validation --max_docs 500
+
+# Full validation run
+venv/bin/python scripts/corpus_pipeline.py --splits validation
+
+# Full run (both splits, all data — takes a while)
+venv/bin/python scripts/corpus_pipeline.py
 ```
 
-### Key Arguments:
-*   `--num_shards`: Number of parallel shards to use for initial data fetching.
-*   `--limit`: Maximum number of records to process per shard (0 for no limit).
-*   `--skip`: Number of records to skip per shard (currently not used in the smart cache but available for future use).
+### Arguments
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--splits` | `train,validation` | Comma-separated splits to process |
+| `--max_docs` | `0` (all) | Limit docs per split for testing |
+| `--output_dir` | `output/` | Base output directory |
 
 ### Automatic Parallelism
-The script automatically detects the number of CPU cores on your machine and sets `--direct_num_workers` to `num_cores - 2` to maximize performance without locking up your machine.
+The script automatically detects the number of CPU cores and sets
+`--direct_num_workers` to `num_cores - 2` to maximize performance.
 
-## Smart Caching
-The pipeline implements a local cache in the `cache/` directory to avoid repeated downloads from HuggingFace.
-*   On the first run, it will stream data from HuggingFace and save it to `cache/`.
-*   On subsequent runs, it will read directly from the local cache. If you increase the `--limit`, it will read what it has from the cache and fetch only the remaining records from HuggingFace.
+## Data Source
 
-The `cache/` directory is ignored by Git.
+The pipeline reads pre-cached parquet files from GCS:
+```
+gs://file-cache-bucket/mc4/ja/train/*.parquet      (10 files, ~40 GB)
+gs://file-cache-bucket/mc4/ja/validation/*.parquet  (2 files, ~500 MB)
+```
+
+These were populated from HuggingFace (`allenai/c4`, Japanese subset) via
+Google Storage Transfer Service. See `GCP.md` for details.
 
 ## Output Files
-*   `word_frequencies.tsv`: The main output containing word frequencies sorted by Sudachi Mode C descending.
-*   `cache/sample_sentences.txt`: A sample of 100 accepted sentences.
-*   `cache/rejected_sentences.txt`: A sample of 100 rejected sentences.
-*   `output.txt`: Final results summary (total sentences and Kanji/Kana retention ratio).
+
+```
+output/
+├── train/
+│   ├── sentences-00000-of-NNNNN.txt.gz  # Full deduplicated corpus (sharded, gzipped)
+│   ├── token_frequencies.tsv             # Word frequencies (Sudachi A, B, C)
+│   ├── sample_sentences.txt             # 100 accepted sentence samples
+│   ├── rejected_sentences.txt           # 100 rejected sentence samples
+│   └── metadata.json                    # Corpus stats (sentence count, retention ratio)
+└── validation/
+    ├── sentences-00000-of-NNNNN.txt.gz
+    ├── token_frequencies.tsv
+    ├── sample_sentences.txt
+    ├── rejected_sentences.txt
+    └── metadata.json
+```

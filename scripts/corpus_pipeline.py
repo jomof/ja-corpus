@@ -1,5 +1,6 @@
 import argparse
 import logging
+import hashlib
 from datasets import load_dataset
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions
@@ -47,6 +48,24 @@ class ProcessDocumentDoFn(beam.DoFn):
             
         yield beam.pvalue.TaggedOutput("counts", (orig_count, recv_count))
 
+def hash_sentence(s):
+    return hashlib.md5(s.encode('utf-8')).hexdigest()
+
+class TakeOneFn(beam.CombineFn):
+    def create_accumulator(self):
+        return None
+    def add_input(self, accumulator, element):
+        if accumulator is None:
+            return element
+        return accumulator
+    def merge_accumulators(self, accumulators):
+        for acc in accumulators:
+            if acc is not None:
+                return acc
+        return None
+    def extract_output(self, accumulator):
+        return accumulator
+
 def run(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="output.txt", help="Output file")
@@ -77,9 +96,17 @@ def run(argv=None):
         counts = results.counts
         rejected = results.rejected
         
-        # Step 4a: Output Samples (Branch)
+        # Step 3.5: Global Deduplication (Option 1)
+        deduplicated_sentences = (
+            sentences
+            | "PairWithHash" >> beam.Map(lambda s: (hash_sentence(s), s))
+            | "DeduplicateByHash" >> beam.CombinePerKey(TakeOneFn())
+            | "ExtractSentence" >> beam.Map(lambda x: x[1])
+        )
+        
+        # Step 4a: Output Samples (Branch) - Use deduplicated sentences
         (
-            sentences 
+            deduplicated_sentences 
             | "TakeSample" >> beam.transforms.combiners.Top.Of(100)
             | "FormatSample" >> beam.FlatMap(lambda sample_list: sample_list)
             | "WriteSample" >> beam.io.WriteToText("sample_sentences.txt", shard_name_template="")
@@ -93,8 +120,8 @@ def run(argv=None):
             | "WriteRejectedSample" >> beam.io.WriteToText("rejected_sentences.txt", shard_name_template="")
         )
         
-        # Step 5: Count sentences
-        total_sentences = sentences | "CountSentences" >> beam.CombineGlobally(beam.combiners.CountCombineFn())
+        # Step 5: Count sentences - Use deduplicated sentences
+        total_sentences = deduplicated_sentences | "CountSentences" >> beam.CombineGlobally(beam.combiners.CountCombineFn())
         
         # Step 6: Calculate Kanji/Kana Ratio
         orig_sum = counts | "GetOrig" >> beam.Map(lambda x: x[0]) | "SumOrig" >> beam.CombineGlobally(sum)

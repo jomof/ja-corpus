@@ -302,6 +302,18 @@ def run(argv=None):
         help="Limit docs per split for testing (0 = all)",
     )
     parser.add_argument(
+        "--max_docs_train",
+        type=int,
+        default=None,
+        help="Explicitly override max docs for train split",
+    )
+    parser.add_argument(
+        "--max_docs_val",
+        type=int,
+        default=None,
+        help="Explicitly override max docs for validation split",
+    )
+    parser.add_argument(
         "--output_dir",
         default="output",
         help="Base output directory (default: output/)",
@@ -332,7 +344,15 @@ def run(argv=None):
             if split not in SPLITS:
                 logging.warning(f"Unknown split '{split}', skipping")
                 continue
-            _build_split_pipeline(p, split, known_args.output_dir, known_args.max_docs)
+            
+            # Resolve split-specific max documents
+            split_max = known_args.max_docs
+            if split == "train" and known_args.max_docs_train is not None:
+                split_max = known_args.max_docs_train
+            if split == "validation" and known_args.max_docs_val is not None:
+                split_max = known_args.max_docs_val
+                
+            _build_split_pipeline(p, split, known_args.output_dir, split_max)
 
 
 if __name__ == "__main__":

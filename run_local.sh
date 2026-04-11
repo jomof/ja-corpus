@@ -39,9 +39,9 @@ if [ ! -d venv ]; then
 fi
 
 echo "Running pipeline..."
-# Default to validation + 100 docs for fast iteration.
-# Override with explicit args, e.g.: ./run_local.sh --splits train,validation --max_docs 0
+# Default to proportional subset of both splits for local comparison/validation.
+# Train split is much larger than validation in mc4, so we sample proportionally.
 if [ $# -eq 0 ]; then
-  set -- --splits validation --max_docs 100
+  set -- --splits train,validation --max_docs_train 10000 --max_docs_val 100
 fi
 venv/bin/python scripts/corpus_pipeline.py "$@"

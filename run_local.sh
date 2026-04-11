@@ -2,13 +2,13 @@
 set -e
 
 REQUIRED_MAJOR=3
-REQUIRED_MINOR=13
+REQUIRED_MINOR=10
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Find python3.13
+# Find python3.10
 PYTHON=""
-for candidate in python3.13 /opt/homebrew/bin/python3.13 /usr/local/bin/python3.13; do
+for candidate in python3.10 /opt/homebrew/bin/python3.10 /usr/local/bin/python3.10; do
   if command -v "$candidate" &>/dev/null; then
     PYTHON="$candidate"
     break

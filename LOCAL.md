@@ -4,15 +4,19 @@ This document describes how to run the `corpus_pipeline.py` pipeline locally for
 
 ## Prerequisites
 
-1.  **Python 3.13**: SudachiPy requires Python ≤ 3.13 (PyO3 compatibility).
+1.  **Python 3.10**: SudachiPy requires Python ≤ 3.13 (PyO3 compatibility).
     ```bash
-    brew install python@3.13  # macOS
+    brew install python@3.10  # macOS
     ```
 2.  **GCP Authentication**: `gcloud auth application-default login` (needed to read from GCS).
 3.  **Virtual Environment**:
     ```bash
-    python3.13 -m venv venv
-    source venv/bin/activate  # On Linux/Mac
+    brew install python@3.10  # macOS
+    # or
+    sudo apt install python3.10-venv  # Linux
+
+    python3.10 -m venv venv
+    source venv/bin/activate
     pip install -r requirements.txt
     ```
 

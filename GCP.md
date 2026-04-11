@@ -72,9 +72,9 @@ gsutil iam ch \
 
 ## Prerequisites
 
-- **Python 3.13**: SudachiPy requires Python ≤ 3.13 (PyO3 compatibility).
+- **Python 3.10**: SudachiPy requires Python ≤ 3.13 (PyO3 compatibility).
   Dataflow workers default to the Python version of the submitting machine,
-  so ensure you submit from a Python 3.13 venv.
+  so ensure you submit from a Python 3.10 venv.
 
 ## Running on Dataflow
 

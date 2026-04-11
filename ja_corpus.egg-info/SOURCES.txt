@@ -1,0 +1,9 @@
+pyproject.toml
+setup.py
+ja_corpus.egg-info/PKG-INFO
+ja_corpus.egg-info/SOURCES.txt
+ja_corpus.egg-info/dependency_links.txt
+ja_corpus.egg-info/top_level.txt
+scripts/__init__.py
+scripts/corpus_pipeline.py
+scripts/ja_sentence_extractor.py

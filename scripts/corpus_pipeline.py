@@ -371,15 +371,20 @@ def _compare_splits(output_dir: str):
                 parts = line.strip("\n").split("\t")
                 if len(parts) >= 5:
                     surf = parts[0]
-                    # We store frequencies across modes.
                     try:
-                        data[surf] = {
-                            "normalized": parts[1] if len(parts) > 1 else surf,
-                            "A": int(parts[2]),
-                            "B": int(parts[3]),
-                            "C": int(parts[4]),
-                            "chive": parts[5] if len(parts) >= 6 else "x"
-                        }
+                        c_a, c_b, c_c = int(parts[2]), int(parts[3]), int(parts[4])
+                        if surf not in data:
+                            data[surf] = {
+                                "normalized": parts[1] if len(parts) > 1 else surf,
+                                "A": c_a,
+                                "B": c_b,
+                                "C": c_c,
+                                "chive": parts[5] if len(parts) >= 6 else "x"
+                            }
+                        else:
+                            data[surf]["A"] += c_a
+                            data[surf]["B"] += c_b
+                            data[surf]["C"] += c_c
                     except ValueError:
                         continue
         return data

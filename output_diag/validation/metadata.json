@@ -1,0 +1,7 @@
+{
+  "split": "validation",
+  "sentence_count": 2470462,
+  "kanji_kana_retention_ratio": 0.729732,
+  "source": "allenai/c4 (mc4 Japanese)",
+  "gcs_base": "gs://file-cache-bucket/mc4/ja"
+}

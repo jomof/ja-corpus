@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import functools
 import hashlib
 import json
 import logging
@@ -87,86 +88,56 @@ class TokenizeAllModesFn(beam.DoFn):
                 .replace("\r", " ")
             )
 
-        try:
-            for t in self.tokenizer.tokenize(sentence, self.mode_a):
-                yield beam.pvalue.TaggedOutput(
-                    "A", (clean(t.surface()), clean(t.normalized_form()))
-                )
-            for t in self.tokenizer.tokenize(sentence, self.mode_b):
-                yield beam.pvalue.TaggedOutput(
-                    "B", (clean(t.surface()), clean(t.normalized_form()))
-                )
-            for t in self.tokenizer.tokenize(sentence, self.mode_c):
-                yield beam.pvalue.TaggedOutput(
-                    "C", (clean(t.surface()), clean(t.normalized_form()))
-                )
-        except Exception as e:
-            logging.error(f"Error in TokenizeAllModesFn: {e}")
+        for t in self.tokenizer.tokenize(sentence, self.mode_a):
+            yield beam.pvalue.TaggedOutput(
+                "A", (clean(t.surface()), clean(t.normalized_form()))
+            )
+        for t in self.tokenizer.tokenize(sentence, self.mode_b):
+            yield beam.pvalue.TaggedOutput(
+                "B", (clean(t.surface()), clean(t.normalized_form()))
+            )
+        for t in self.tokenizer.tokenize(sentence, self.mode_c):
+            yield beam.pvalue.TaggedOutput(
+                "C", (clean(t.surface()), clean(t.normalized_form()))
+            )
+
+
+CHIVE_PATH = "gs://file-cache-bucket/chIve-1.3-mc5/tokens.txt"
+
+
+@functools.lru_cache(maxsize=1)
+def _load_chive_lines():
+    """Load chiVe token list from GCS. Cached after first call.
+
+    The file is plain UTF-8 text, one token per line.
+    Returns a tuple of non-empty stripped lines.
+    """
+    from apache_beam.io.filesystems import FileSystems
+
+    logging.info("Loading chiVe dictionary from GCS (should appear once)")
+    with FileSystems.open(CHIVE_PATH) as f_in:
+        raw_data = f_in.read().decode("utf-8")
+    return tuple(line.strip() for line in raw_data.split("\n") if line.strip())
 
 
 class FilterByChiveDoFn(beam.DoFn):
     def setup(self):
-        import gzip
-        import logging
-        from apache_beam.io.filesystems import FileSystems
         from sudachipy import dictionary, tokenizer
-        
-        self.chive_vocab = set()
-        targets = [
-            "../.cache/chive/tokens.txt.gz",
-            ".cache/chive/tokens.txt.gz",
-            "gs://file-cache-bucket/chIve-1.3-mc5/tokens.txt.gz"
-        ]
-        loaded = False
-        last_err = None
-        for target in targets:
-            try:
-                with FileSystems.open(target) as f_in:
-                    # GCS and Local FileSystems handle .gz decompression inconsistently 
-                    # Try reading raw; if it's not gzipped (e.g. auto-decompressed by Beam), it's UTF-8.
-                    raw_bytes = f_in.read()
-                    if raw_bytes.startswith(b'\x1f\x8b'):
-                        import io
-                        import gzip
-                        with gzip.GzipFile(fileobj=io.BytesIO(raw_bytes), mode="r") as gz:
-                            raw_data = gz.read().decode("utf-8", errors="replace")
-                    else:
-                        raw_data = raw_bytes.decode("utf-8", errors="replace")
-                            
-                    lines = raw_data.split("\n")
-                    for line in lines:
-                        line = line.strip()
-                        if line:
-                            self.chive_vocab.add(line)
-                    loaded = True
-                    break
-            except Exception as e:
-                logging.warning(f"FilterByChive: Could not instantiate target {target}: {e}")
-        
-        if not loaded:
-            logging.error("Failed to load any chiVe dictionary. Falling back to ALL pass!")
 
+        self.chive_vocab = set(_load_chive_lines())
         self.dict = dictionary.Dictionary()
         self.tokenizer = self.dict.create()
         self.mode_c = tokenizer.Tokenizer.SplitMode.C
 
     def process(self, sentence):
-        if not self.chive_vocab:
-            yield sentence
-            return
-            
-        try:
-            tokens = self.tokenizer.tokenize(sentence, self.mode_c)
-            for t in tokens:
-                surface = t.surface()
-                normalized = t.normalized_form()
-                if surface not in self.chive_vocab and normalized not in self.chive_vocab:
-                    yield beam.pvalue.TaggedOutput("rejected", sentence)
-                    return
-            yield sentence
-        except Exception as e:
-            logging.error(f"Error in FilterByChiveDoFn parsing sentence: {e}")
-            yield beam.pvalue.TaggedOutput("rejected", sentence)
+        tokens = self.tokenizer.tokenize(sentence, self.mode_c)
+        for t in tokens:
+            surface = t.surface()
+            normalized = t.normalized_form()
+            if surface not in self.chive_vocab and normalized not in self.chive_vocab:
+                yield beam.pvalue.TaggedOutput("rejected", sentence)
+                return
+        yield sentence
 
 
 def _write_split(p, deduplicated, counts, rejected, split, output_dir):
@@ -205,45 +176,12 @@ def _write_split(p, deduplicated, counts, rejected, split, output_dir):
 
     class FormatTSVRowDoFn(beam.DoFn):
         def setup(self):
-            import io
-            import gzip
-            import logging
-            from apache_beam.io.filesystems import FileSystems
             self.percentiles = {}
-            targets = [
-                "../.cache/chive/tokens.txt.gz",
-                ".cache/chive/tokens.txt.gz",
-                "gs://file-cache-bucket/chIve-1.3-mc5/tokens.txt.gz"
-            ]
-            loaded = False
-            last_err = None
-            for target in targets:
-                try:
-                    with FileSystems.open(target) as f_in:
-                        raw_bytes = f_in.read()
-                        if raw_bytes.startswith(b'\x1f\x8b'):
-                            import io
-                            import gzip
-                            with gzip.GzipFile(fileobj=io.BytesIO(raw_bytes), mode="r") as gz:
-                                raw_data = gz.read().decode("utf-8", errors="replace")
-                        else:
-                            raw_data = raw_bytes.decode("utf-8", errors="replace")
-                                
-                        lines = raw_data.split("\n")
-                        total = sum(1 for line in lines if line.strip())
-                        for r, line in enumerate(lines):
-                            line = line.strip()
-                            if line:
-                                p = 100.0 * (1.0 - (r / total))
-                                self.percentiles[line] = f"{p:.2f}"
-                        loaded = True
-                        break
-                except Exception as e:
-                    last_err = e
-                    logging.warning(f"Could not instantiate chive target {target}: {e}")
-            
-            if not loaded:
-                raise RuntimeError(f"Failed to load chive dictionary fallback loop. Last error: {last_err}")
+            lines = _load_chive_lines()
+            total = len(lines)
+            for r, line in enumerate(lines):
+                p = 100.0 * (1.0 - (r / total))
+                self.percentiles[line] = f"{p:.2f}"
 
         def process(self, element):
             key, data = element
@@ -387,22 +325,19 @@ def _compare_splits(output_dir: str):
                 parts = line.strip("\n").split("\t")
                 if len(parts) >= 5:
                     surf = parts[0]
-                    try:
-                        c_a, c_b, c_c = int(parts[2]), int(parts[3]), int(parts[4])
-                        if surf not in data:
-                            data[surf] = {
-                                "normalized": parts[1] if len(parts) > 1 else surf,
-                                "A": c_a,
-                                "B": c_b,
-                                "C": c_c,
-                                "chive": parts[5] if len(parts) >= 6 else "x"
-                            }
-                        else:
-                            data[surf]["A"] += c_a
-                            data[surf]["B"] += c_b
-                            data[surf]["C"] += c_c
-                    except ValueError:
-                        continue
+                    c_a, c_b, c_c = int(parts[2]), int(parts[3]), int(parts[4])
+                    if surf not in data:
+                        data[surf] = {
+                            "normalized": parts[1] if len(parts) > 1 else surf,
+                            "A": c_a,
+                            "B": c_b,
+                            "C": c_c,
+                            "chive": parts[5] if len(parts) >= 6 else "x"
+                        }
+                    else:
+                        data[surf]["A"] += c_a
+                        data[surf]["B"] += c_b
+                        data[surf]["C"] += c_c
         return data
 
     logging.info("Analyzing token distribution alignments...")
@@ -454,52 +389,20 @@ def _compare_splits(output_dir: str):
     val_missing_chive_sorted = sorted([w for w in val_vocab if val_data[w].get("chive", "x") == "x"], key=lambda x: val_data[x]["C"], reverse=True)
     
     chive_missing_list = []
-    import gzip
-    targets = [
-        "../.cache/chive/tokens.txt.gz",
-        ".cache/chive/tokens.txt.gz",
-        "gs://file-cache-bucket/chIve-1.3-mc5/tokens.txt.gz"
-    ]
-    loaded = False
-    last_err = None
-    for target in targets:
-        try:
-            with FileSystems.open(target) as f_in:
-                raw_bytes = f_in.read()
-                if raw_bytes.startswith(b'\x1f\x8b'):
-                    import io
-                    import gzip
-                    with gzip.GzipFile(fileobj=io.BytesIO(raw_bytes), mode="r") as gz:
-                        raw_data = gz.read().decode("utf-8", errors="replace")
-                else:
-                    raw_data = raw_bytes.decode("utf-8", errors="replace")
-                        
-                lines = raw_data.split("\n")
-                total = sum(1 for line in lines if line.strip())
-                if total > 0:
-                    union_vocab_all = set(union_vocab)
-                    for w in train_vocab:
-                        union_vocab_all.add(train_data[w]["normalized"])
-                    for w in val_vocab:
-                        union_vocab_all.add(val_data[w]["normalized"])
-                    
-                    for r, line in enumerate(lines):
-                        line = line.strip()
-                        if not line: continue
-                        if line not in union_vocab_all:
-                            p = 100.0 * (1.0 - (r / total))
-                            chive_missing_list.append((line, p))
-                            if len(chive_missing_list) >= 50:
-                                break
-                    loaded = True
+    lines = _load_chive_lines()
+    total = len(lines)
+    union_vocab_all = set(union_vocab)
+    for w in train_vocab:
+        union_vocab_all.add(train_data[w]["normalized"])
+    for w in val_vocab:
+        union_vocab_all.add(val_data[w]["normalized"])
+
+    for r, line in enumerate(lines):
+        if line not in union_vocab_all:
+            p = 100.0 * (1.0 - (r / total))
+            chive_missing_list.append((line, p))
+            if len(chive_missing_list) >= 50:
                 break
-        except Exception as e:
-            last_err = e
-            print(f"FAILED TO LOAD {target}: {e}")
-            continue
-            
-    if not loaded:
-        raise RuntimeError(f"Failed to load chiVe dictionary in comparison loop. Last error: {last_err}")
     
     report_lines = []
     report_lines.append("# Kotogram Train vs Validation Split Comparison")

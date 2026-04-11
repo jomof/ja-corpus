@@ -122,15 +122,24 @@ class FilterByChiveDoFn(beam.DoFn):
         for target in targets:
             try:
                 with FileSystems.open(target) as f_in:
-                    with gzip.GzipFile(fileobj=f_in, mode="r") as gz:
-                        raw_data = gz.read().decode("utf-8")
-                        lines = raw_data.split("\n")
-                        for line in lines:
-                            line = line.strip()
-                            if line:
-                                self.chive_vocab.add(line)
-                        loaded = True
-                        break
+                    # GCS and Local FileSystems handle .gz decompression inconsistently 
+                    # Try reading raw; if it's not gzipped (e.g. auto-decompressed by Beam), it's UTF-8.
+                    raw_bytes = f_in.read()
+                    if raw_bytes.startswith(b'\x1f\x8b'):
+                        import io
+                        import gzip
+                        with gzip.GzipFile(fileobj=io.BytesIO(raw_bytes), mode="r") as gz:
+                            raw_data = gz.read().decode("utf-8", errors="replace")
+                    else:
+                        raw_data = raw_bytes.decode("utf-8", errors="replace")
+                            
+                    lines = raw_data.split("\n")
+                    for line in lines:
+                        line = line.strip()
+                        if line:
+                            self.chive_vocab.add(line)
+                    loaded = True
+                    break
             except Exception as e:
                 logging.warning(f"FilterByChive: Could not instantiate target {target}: {e}")
         
@@ -196,6 +205,7 @@ def _write_split(p, deduplicated, counts, rejected, split, output_dir):
 
     class FormatTSVRowDoFn(beam.DoFn):
         def setup(self):
+            import io
             import gzip
             import logging
             from apache_beam.io.filesystems import FileSystems
@@ -210,18 +220,24 @@ def _write_split(p, deduplicated, counts, rejected, split, output_dir):
             for target in targets:
                 try:
                     with FileSystems.open(target) as f_in:
-                        with gzip.GzipFile(fileobj=f_in, mode="r") as gz:
-                            raw_data = gz.read().decode("utf-8")
-                            lines = raw_data.split("\n")
-                            total = sum(1 for line in lines if line.strip())
-                            if total > 0:
-                                for r, line in enumerate(lines):
-                                    line = line.strip()
-                                    if not line: continue
-                                    p = 100.0 * (1.0 - (r / total))
-                                    self.percentiles[line] = f"{p:.2f}"
-                                loaded = True
-                                break
+                        raw_bytes = f_in.read()
+                        if raw_bytes.startswith(b'\x1f\x8b'):
+                            import io
+                            import gzip
+                            with gzip.GzipFile(fileobj=io.BytesIO(raw_bytes), mode="r") as gz:
+                                raw_data = gz.read().decode("utf-8", errors="replace")
+                        else:
+                            raw_data = raw_bytes.decode("utf-8", errors="replace")
+                                
+                        lines = raw_data.split("\n")
+                        total = sum(1 for line in lines if line.strip())
+                        for r, line in enumerate(lines):
+                            line = line.strip()
+                            if line:
+                                p = 100.0 * (1.0 - (r / total))
+                                self.percentiles[line] = f"{p:.2f}"
+                        loaded = True
+                        break
                 except Exception as e:
                     last_err = e
                     logging.warning(f"Could not instantiate chive target {target}: {e}")
@@ -259,7 +275,7 @@ def _write_split(p, deduplicated, counts, rejected, split, output_dir):
 
     (
         deduplicated
-        | f"TakeSample{tag}" >> beam.transforms.combiners.Top.Of(100)
+        | f"TakeSample{tag}" >> beam.combiners.Sample.FixedSizeGlobally(100)
         | f"FmtSample{tag}" >> beam.FlatMap(lambda x: x)
         | f"WriteSample{tag}"
         >> beam.io.WriteToText(
@@ -270,7 +286,7 @@ def _write_split(p, deduplicated, counts, rejected, split, output_dir):
 
     (
         rejected
-        | f"TakeReject{tag}" >> beam.transforms.combiners.Top.Of(100)
+        | f"TakeReject{tag}" >> beam.combiners.Sample.FixedSizeGlobally(100)
         | f"FmtReject{tag}" >> beam.FlatMap(lambda x: x)
         | f"WriteReject{tag}"
         >> beam.io.WriteToText(
@@ -286,7 +302,7 @@ def _write_split(p, deduplicated, counts, rejected, split, output_dir):
     (
         rejected
         | f"FilterWatch{tag}" >> beam.Filter(filter_watch_tokens)
-        | f"TakeWatchReject{tag}" >> beam.transforms.combiners.Top.Of(500)
+        | f"TakeWatchReject{tag}" >> beam.combiners.Sample.FixedSizeGlobally(500)
         | f"FmtWatchReject{tag}" >> beam.FlatMap(lambda x: x)
         | f"WriteWatchReject{tag}"
         >> beam.io.WriteToText(
@@ -449,27 +465,34 @@ def _compare_splits(output_dir: str):
     for target in targets:
         try:
             with FileSystems.open(target) as f_in:
-                with gzip.GzipFile(fileobj=f_in, mode="r") as gz:
-                    raw_data = gz.read().decode("utf-8")
-                    lines = raw_data.split("\n")
-                    total = sum(1 for line in lines if line.strip())
-                    if total > 0:
-                        union_vocab_all = set(union_vocab)
-                        for w in train_vocab:
-                            union_vocab_all.add(train_data[w]["normalized"])
-                        for w in val_vocab:
-                            union_vocab_all.add(val_data[w]["normalized"])
+                raw_bytes = f_in.read()
+                if raw_bytes.startswith(b'\x1f\x8b'):
+                    import io
+                    import gzip
+                    with gzip.GzipFile(fileobj=io.BytesIO(raw_bytes), mode="r") as gz:
+                        raw_data = gz.read().decode("utf-8", errors="replace")
+                else:
+                    raw_data = raw_bytes.decode("utf-8", errors="replace")
                         
-                        for r, line in enumerate(lines):
-                            line = line.strip()
-                            if not line: continue
-                            if line not in union_vocab_all:
-                                p = 100.0 * (1.0 - (r / total))
-                                chive_missing_list.append((line, p))
-                                if len(chive_missing_list) >= 50:
-                                    break
-                        loaded = True
-                    break
+                lines = raw_data.split("\n")
+                total = sum(1 for line in lines if line.strip())
+                if total > 0:
+                    union_vocab_all = set(union_vocab)
+                    for w in train_vocab:
+                        union_vocab_all.add(train_data[w]["normalized"])
+                    for w in val_vocab:
+                        union_vocab_all.add(val_data[w]["normalized"])
+                    
+                    for r, line in enumerate(lines):
+                        line = line.strip()
+                        if not line: continue
+                        if line not in union_vocab_all:
+                            p = 100.0 * (1.0 - (r / total))
+                            chive_missing_list.append((line, p))
+                            if len(chive_missing_list) >= 50:
+                                break
+                    loaded = True
+                break
         except Exception as e:
             last_err = e
             print(f"FAILED TO LOAD {target}: {e}")
@@ -562,6 +585,18 @@ def run(argv=None):
         help="Float percentage of deduplicated sentences dynamically partitioned to validation branch. (0.1 = 10%)",
     )
     parser.add_argument(
+        "--include_mc4",
+        type=lambda x: str(x).lower() == 'true',
+        default=True,
+        help="Whether to include the mC4 dataset."
+    )
+    parser.add_argument(
+        "--include_wikipedia",
+        type=lambda x: str(x).lower() == 'true',
+        default=True,
+        help="Whether to include Wikipedia in the dataset."
+    )
+    parser.add_argument(
         "--output_dir",
         default="output",
         help="Base output directory (default: output/)",
@@ -589,16 +624,39 @@ def run(argv=None):
         return 1 if (h % 1000) < (val_ratio * 1000) else 0
 
     with beam.Pipeline(options=pipeline_options) as p:
-        if known_args.max_docs > 0:
-            file_pattern = f"{GCS_BASE}/train/0.parquet"
-        else:
-            file_pattern = f"{GCS_BASE}/*/*.parquet"
+        texts_combined = []
+        if known_args.include_mc4:
+            if known_args.max_docs > 0:
+                file_pattern = f"{GCS_BASE}/train/0.parquet"
+            else:
+                file_pattern = f"{GCS_BASE}/*/*.parquet"
 
+            texts_mc4 = (
+                p
+                | "ReadGloballyMC4"
+                >> beam.io.ReadFromParquet(file_pattern=file_pattern, columns=["text"])
+                | "ExtractTextMC4" >> beam.Map(lambda row: row["text"])
+            )
+            texts_combined.append(texts_mc4)
+        
+        if known_args.include_wikipedia:
+            WIKI_GCS_BASE = "gs://file-cache-bucket/wikipedia/ja"
+            if known_args.max_docs > 0:
+                wiki_file_pattern = f"{WIKI_GCS_BASE}/train-00000-of-00015.parquet"
+            else:
+                wiki_file_pattern = f"{WIKI_GCS_BASE}/*.parquet"
+                
+            texts_wiki = (
+                p
+                | "ReadGloballyWiki"
+                >> beam.io.ReadFromParquet(file_pattern=wiki_file_pattern, columns=["text"])
+                | "ExtractTextWiki" >> beam.Map(lambda row: row["text"])
+            )
+            texts_combined.append(texts_wiki)
+            
         texts = (
-            p
-            | "ReadGlobally"
-            >> beam.io.ReadFromParquet(file_pattern=file_pattern, columns=["text"])
-            | "ExtractTextGlobally" >> beam.Map(lambda row: row["text"])
+            texts_combined
+            | "MergeSources" >> beam.Flatten()
         )
 
         if known_args.max_docs > 0:

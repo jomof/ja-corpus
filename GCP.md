@@ -70,6 +70,31 @@ gsutil iam ch \
   gs://file-cache-bucket
 ```
 
+### Populating Wikipedia from HuggingFace (Optional)
+
+We also support dynamically merging the high-density Japanese Wikipedia corpus into your dataset using the exact same STS mechanism! 
+
+1. Use the pre-generated `wiki_manifest.tsv`.
+2. Upload the manifest:
+   ```bash
+   gsutil cp wiki_manifest.tsv gs://file-cache-bucket/wiki_manifest.tsv
+   gsutil acl ch -u AllUsers:R gs://file-cache-bucket/wiki_manifest.tsv
+   ```
+3. Create the transfer job:
+   ```bash
+   gcloud transfer jobs create \
+     "https://storage.googleapis.com/file-cache-bucket/wiki_manifest.tsv" \
+     "gs://file-cache-bucket/wikipedia/ja/" \
+     --name=wiki-ja-import
+   ```
+4. After it completes, clean up the nested directories natively:
+   ```bash
+   gsutil -m mv \
+     "gs://file-cache-bucket/wikipedia/ja/huggingface.co/datasets/wikimedia/wikipedia/resolve/main/20231101.ja/*" \
+     "gs://file-cache-bucket/wikipedia/ja/"
+   gsutil -m rm -r "gs://file-cache-bucket/wikipedia/ja/huggingface.co/"
+   ```
+
 ## Prerequisites
 
 - **Python 3.10**: SudachiPy requires Python ≤ 3.13 (PyO3 compatibility).

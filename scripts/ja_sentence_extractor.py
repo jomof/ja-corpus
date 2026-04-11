@@ -16,8 +16,8 @@ def starts_with_valid_char(text):
     # Strip leading emojis and spaces
     text = EMOJI_REGEX.sub("", text).strip()
 
-    # Strip leading quote markers and brackets (including Japanese quotes)
-    text = re.sub(r"^[＞>［\[＜<【｢「（(]+", "", text).strip()
+    # Strip leading quote markers, brackets, and colons.
+    text = re.sub(r"^[＞>［\[＜<【｢「（(：:]+", "", text).strip()
 
     if not text:
         return False
@@ -108,13 +108,47 @@ def is_valid_sentence(tokens):
 
 
 def strip_matched_brackets(text):
-    pairs = [("（", "）"), ("(", ")"), ("［", "］"), ("[", "]"), ("【", "】")]
+    pairs = [
+        ("（", "）"), ("(", ")"), ("［", "］"), ("[", "]"), 
+        ("【", "】"), ("「", "」"), ("｢", "｣"), ("＜", "＞"), ("<", ">")
+    ]
     changed = True
     while changed:
         changed = False
         for left, right in pairs:
             if text.startswith(left) and text.endswith(right):
                 text = text[1:-1].strip()
+                changed = True
+                break
+    return text
+
+
+def strip_unbalanced_brackets(text):
+    pairs = [
+        ("（", "）"), ("(", ")"), ("［", "］"), ("[", "]"), 
+        ("【", "】"), ("「", "」"), ("｢", "｣"), ("＜", "＞"), ("<", ">")
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for left, right in pairs:
+            # Check leading brackets
+            if text.startswith(left) and text.count(left) > text.count(right):
+                text = text[1:].lstrip()
+                changed = True
+                break
+            if text.startswith(right) and text.count(right) > text.count(left):
+                text = text[1:].lstrip()
+                changed = True
+                break
+                
+            # Check trailing brackets
+            if text.endswith(right) and text.count(right) > text.count(left):
+                text = text[:-1].rstrip()
+                changed = True
+                break
+            if text.endswith(left) and text.count(left) > text.count(right):
+                text = text[:-1].rstrip()
                 changed = True
                 break
     return text
@@ -246,8 +280,16 @@ class SentenceExtractor:
         # First pass: Calculate counts on ALL extracted sentences (preserving duplicates for ratio)
         for s in extracted_sentences:
             if starts_with_valid_char(s) and contains_hiragana_kana(s):
-                s_clean = re.sub(r"^[＞>]+", "", s).strip()
+                s_clean = re.sub(r"^[＞>：:\s]+", "", s).strip()
+                # Strip numeric list markers (e.g. 1), １）, 1., １．)
+                s_clean = re.sub(r"^[0-9０-９]+[）\)\.．]\s*", "", s_clean)
+                
                 s_clean = strip_matched_brackets(s_clean)
+                s_clean = strip_unbalanced_brackets(s_clean)
+                
+                # Strip numeric list markers again in case they were hidden inside leading brackets like "(1)"
+                s_clean = re.sub(r"^[0-9０-９]+[）\)\.．]\s*", "", s_clean)
+                
                 s_clean = re.sub(r"\s+", "", s_clean)
 
                 # Filter by Japanese character density (>= 75%)

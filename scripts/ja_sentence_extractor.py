@@ -97,11 +97,11 @@ def is_valid_sentence(tokens):
 
     # Rule 4: Disallow non-natural symbols in text
     full_text = "".join(t.surface() for t in tokens)
-    if any(sym in full_text for sym in ["←", "→", "[[", "]]"]):
+    if any(sym in full_text for sym in ["[[", "]]"]):
         return False
 
     # Rule 5: Disallow ending with leader or interpunct (indicates cut off or list)
-    if tokens[-1].surface() in ["‥", "…", "・"]:
+    if tokens[-1].surface() in ["‥", "・"]:
         return False
 
     return True
@@ -125,11 +125,13 @@ def get_japanese_density(text):
         return 0.0
     jp_regex = r"[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uFF65-\uFF9F]"
     punct_regex = r"[、。・！？!?,.]"
+    digit_regex = r"[0-9\uFF10-\uFF19]"
 
     jp_count = len(re.findall(jp_regex, text))
     punct_count = len(re.findall(punct_regex, text))
+    digit_count = len(re.findall(digit_regex, text))
 
-    return (jp_count + punct_count) / len(text)
+    return (jp_count + punct_count + digit_count) / len(text)
 
 
 class SentenceExtractor:
@@ -246,6 +248,7 @@ class SentenceExtractor:
             if starts_with_valid_char(s) and contains_hiragana_kana(s):
                 s_clean = re.sub(r"^[＞>]+", "", s).strip()
                 s_clean = strip_matched_brackets(s_clean)
+                s_clean = re.sub(r"\s+", "", s_clean)
 
                 # Filter by Japanese character density (>= 75%)
                 if get_japanese_density(s_clean) >= 0.75:

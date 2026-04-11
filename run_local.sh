@@ -39,9 +39,8 @@ if [ ! -d venv ]; then
 fi
 
 echo "Running pipeline..."
-# Default to proportional subset of both splits for local comparison/validation.
-# Train split is much larger than validation in mc4, so we sample proportionally.
+# Default to 2020 total docs locally, randomly splitting 10% strictly into validation natively.
 if [ $# -eq 0 ]; then
-  set -- --splits train,validation --max_docs_train 1000 --max_docs_val 10
+  set -- --max_docs 2020 --val_ratio 0.1
 fi
 venv/bin/python scripts/corpus_pipeline.py "$@"

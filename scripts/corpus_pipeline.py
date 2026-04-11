@@ -26,7 +26,6 @@ import os
 
 import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions
-
 from ja_sentence_extractor import SentenceExtractor
 
 GCS_BASE = "gs://file-cache-bucket/mc4/ja"
@@ -38,9 +37,7 @@ class ProcessDocumentDoFn(beam.DoFn):
         self.extractor = SentenceExtractor()
 
     def process(self, text):
-        accepted, rejected, orig_count, recv_count = (
-            self.extractor.process_document(text)
-        )
+        accepted, rejected, orig_count, recv_count = self.extractor.process_document(text)
         for s in accepted:
             yield s
         for s in rejected:
@@ -73,8 +70,7 @@ class TakeOneFn(beam.CombineFn):
 
 class TokenizeAllModesFn(beam.DoFn):
     def setup(self):
-        from sudachipy import dictionary
-        from sudachipy import tokenizer
+        from sudachipy import dictionary, tokenizer
 
         self.dict = dictionary.Dictionary()
         self.tokenizer = self.dict.create()
@@ -108,9 +104,7 @@ class TokenizeAllModesFn(beam.DoFn):
             logging.error(f"Error in TokenizeAllModesFn: {e}")
 
 
-def _build_split_pipeline(
-    p, split, output_dir, max_docs
-):
+def _build_split_pipeline(p, split, output_dir, max_docs):
     """Build the processing sub-pipeline for a single split."""
     tag = split.capitalize()
 
@@ -122,7 +116,8 @@ def _build_split_pipeline(
         file_pattern = f"{GCS_BASE}/{split}/*.parquet"
     texts = (
         p
-        | f"Read{tag}" >> beam.io.ReadFromParquet(
+        | f"Read{tag}"
+        >> beam.io.ReadFromParquet(
             file_pattern=file_pattern,
             columns=["text"],
         )
@@ -140,12 +135,8 @@ def _build_split_pipeline(
         )
 
     # Process documents
-    results = (
-        texts
-        | f"ProcessDocs{tag}"
-        >> beam.ParDo(ProcessDocumentDoFn()).with_outputs(
-            "counts", "rejected", main="sentences"
-        )
+    results = texts | f"ProcessDocs{tag}" >> beam.ParDo(ProcessDocumentDoFn()).with_outputs(
+        "counts", "rejected", main="sentences"
     )
     sentences = results.sentences
     counts = results.counts
@@ -175,20 +166,15 @@ def _build_split_pipeline(
 
     # Tokenize and compute token frequencies.
     # Each token yields a (surface, normalized_form) pair as the key.
-    mode_tokens = (
-        deduplicated
-        | f"Tokenize{tag}"
-        >> beam.ParDo(TokenizeAllModesFn()).with_outputs("A", "B", "C")
+    mode_tokens = deduplicated | f"Tokenize{tag}" >> beam.ParDo(TokenizeAllModesFn()).with_outputs(
+        "A", "B", "C"
     )
 
     count_a = mode_tokens.A | f"CountA{tag}" >> beam.combiners.Count.PerElement()
     count_b = mode_tokens.B | f"CountB{tag}" >> beam.combiners.Count.PerElement()
     count_c = mode_tokens.C | f"CountC{tag}" >> beam.combiners.Count.PerElement()
 
-    joined = (
-        {"A": count_a, "B": count_b, "C": count_c}
-        | f"CoGroup{tag}" >> beam.CoGroupByKey()
-    )
+    joined = {"A": count_a, "B": count_b, "C": count_c} | f"CoGroup{tag}" >> beam.CoGroupByKey()
 
     def get_sort_key(element):
         _, data = element
@@ -205,12 +191,10 @@ def _build_split_pipeline(
         c_c = data["C"][0] if data["C"] else 0
         return f"{surface}\t{normalized}\t{c_a}\t{c_b}\t{c_c}"
 
-
     # Write token frequencies
     (
         joined
-        | f"TopN{tag}"
-        >> beam.transforms.combiners.Top.Of(1000000, key=get_sort_key)
+        | f"TopN{tag}" >> beam.transforms.combiners.Top.Of(1000000, key=get_sort_key)
         | f"FlatTop{tag}" >> beam.FlatMap(lambda x: x)
         | f"FormatTSV{tag}" >> beam.Map(format_tsv_row)
         | f"WriteFreq{tag}"
@@ -250,9 +234,8 @@ def _build_split_pipeline(
     )
 
     # Summary stats
-    total_sentences = (
-        deduplicated
-        | f"CountSent{tag}" >> beam.CombineGlobally(beam.combiners.CountCombineFn())
+    total_sentences = deduplicated | f"CountSent{tag}" >> beam.CombineGlobally(
+        beam.combiners.CountCombineFn()
     )
     orig_sum = (
         counts
@@ -272,10 +255,8 @@ def _build_split_pipeline(
             else:
                 yield recv / orig
 
-    ratio = (
-        recv_sum
-        | f"Ratio{tag}"
-        >> beam.ParDo(ComputeRatioFn(), orig=beam.pvalue.AsSingleton(orig_sum))
+    ratio = recv_sum | f"Ratio{tag}" >> beam.ParDo(
+        ComputeRatioFn(), orig=beam.pvalue.AsSingleton(orig_sum)
     )
 
     results_output = p | f"Dummy{tag}" >> beam.Create([None])
@@ -351,9 +332,7 @@ def run(argv=None):
             if split not in SPLITS:
                 logging.warning(f"Unknown split '{split}', skipping")
                 continue
-            _build_split_pipeline(
-                p, split, known_args.output_dir, known_args.max_docs
-            )
+            _build_split_pipeline(p, split, known_args.output_dir, known_args.max_docs)
 
 
 if __name__ == "__main__":
